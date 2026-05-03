@@ -126,8 +126,11 @@ python3 extract_gemini.py
 # Extract from OpenCode
 python3 extract_opencode.py
 
-# Extract from ALL tools at once
+# Extract from ALL tools at once on macOS/Linux
 ./extract_all.sh
+
+# Extract from ALL tools at once on Windows PowerShell
+.\extract_all.ps1
 ```
 
 ### Output
