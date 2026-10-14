@@ -109,6 +109,9 @@ Write-Host ''
 $outputDir = Join-Path $ScriptRoot 'extracted_data'
 New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
 
+# Keep any historical corpus intact and combine only files produced by this run.
+$runStarted = Get-Date
+
 $previousPythonIoEncoding = $env:PYTHONIOENCODING
 $previousPythonUtf8 = $env:PYTHONUTF8
 $env:PYTHONIOENCODING = 'utf-8'
@@ -127,7 +130,13 @@ $extractors = @(
     @{ Name = 'Windsurf'; Script = 'extract_windsurf.py'; Log = 'windsurf_extraction.log'; Pattern = 'Total conversations: [1-9]' },
     @{ Name = 'Continue'; Script = 'extract_continue.py'; Log = 'continue_extraction.log'; Pattern = 'Found [1-9]' },
     @{ Name = 'Gemini CLI'; Script = 'extract_gemini.py'; Log = 'gemini_extraction.log'; Pattern = 'Total conversations: [1-9]' },
-    @{ Name = 'OpenCode'; Script = 'extract_opencode.py'; Log = 'opencode_extraction.log'; Pattern = 'Total conversations extracted: [1-9]' }
+    @{ Name = 'OpenCode'; Script = 'extract_opencode.py'; Log = 'opencode_extraction.log'; Pattern = 'Total conversations extracted: [1-9]' },
+    @{ Name = 'Cursor CLI'; Script = 'extract_cursor_cli.py'; Log = 'cursor_cli_extraction.log'; Pattern = 'Total conversations: [1-9]' },
+    @{ Name = 'Pi'; Script = 'extract_pi.py'; Log = 'pi_extraction.log'; Pattern = 'Total conversations: [1-9]' },
+    @{ Name = 'OMP'; Script = 'extract_omp.py'; Log = 'omp_extraction.log'; Pattern = 'Total conversations: [1-9]' },
+    @{ Name = 'Droid'; Script = 'extract_droid.py'; Log = 'droid_extraction.log'; Pattern = 'Total conversations: [1-9]' },
+    @{ Name = 'OpenClaw'; Script = 'extract_openclaw.py'; Log = 'openclaw_extraction.log'; Pattern = 'Total conversations: [1-9]' },
+    @{ Name = 'Hermes'; Script = 'extract_hermes.py'; Log = 'hermes_extraction.log'; Pattern = 'Total conversations: [1-9]' }
 )
 
 foreach ($extractor in $extractors) {
@@ -188,8 +197,9 @@ if ($failedTools.Count -gt 0) {
     Write-Host ''
 }
 
+# Count only the conversations extracted during this run. Existing corpora stay untouched.
 $jsonlFiles = @(Get-ChildItem -Path $outputDir -Filter '*.jsonl' -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -notlike 'ALL_CONVERSATIONS_*.jsonl' })
+    Where-Object { $_.Name -notlike 'ALL_CONVERSATIONS_*.jsonl' -and $_.LastWriteTime -ge $runStarted })
 
 $totalLines = 0
 foreach ($file in $jsonlFiles) {
