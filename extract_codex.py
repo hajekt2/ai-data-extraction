@@ -1,15 +1,40 @@
 #!/usr/bin/env python3
 """
 Extract ALL Codex chat data from all projects
-Includes: messages, code context, diffs, file references
+Includes: messages, reasoning, commands, file edits, tool output, token usage
 Auto-discovers Codex installations on the device
+
+Codex writes one rollout file per session under `sessions/YYYY/MM/DD/rollout-*.jsonl`
+and moves older rollouts into `archived_sessions/`, where recent builds store them
+zstd-compressed as `rollout-*.jsonl.zst`. Current rollouts describe the conversation
+through `event_msg` / `item_completed` items (UserMessage, AgentMessage,
+CommandExecution, FileChange, ...); older builds used `event_msg` payloads named
+`user_message` and `agent_message`. Both shapes are parsed. A session that exists in
+both the live and the archived location is emitted once, from the richer file.
 """
 
+import io
 import json
-from pathlib import Path
-from datetime import datetime
-import platform
 import os
+import platform
+import shutil
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+
+# Item types that carry conversation text rather than tool activity.
+TEXT_ITEMS = {'UserMessage': 'user', 'AgentMessage': 'assistant'}
+
+# Item types that represent the agent doing something; mapped onto tool calls.
+TOOL_ITEM_KEYS = {
+    'CommandExecution': ('exec', ('command', 'cwd', 'parsed_cmd', 'source', 'status', 'exit_code')),
+    'FileChange': ('edit', ('changes',)),
+    'Extension': ('extension', ('kind', 'action', 'query', 'queries')),
+    'SubAgentActivity': ('subagent', ('kind', 'agent_path', 'agent_thread_id')),
+    'ImageView': ('image_view', ('path',)),
+    'WebSearch': ('web_search', ('query', 'queries')),
+}
+
 
 def find_codex_installations():
     """Find all Codex installation directories"""
@@ -55,114 +80,281 @@ def find_codex_installations():
 
     return list(set(locations))
 
-def extract_codex_session(session_file):
-    """Extract conversation from a Codex rollout file with full context"""
-    messages = []
-    session_meta = {}
-    tool_results = []
 
-    with open(session_file, 'r') as f:
-        for line in f:
+def _text(content):
+    """Join the text of a string or of a list of content parts."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ''
+    parts = []
+    for item in content:
+        if isinstance(item, dict) and isinstance(item.get('text'), str):
+            parts.append(item['text'])
+    return '\n'.join(parts)
+
+
+def _iso(ts):
+    if isinstance(ts, (int, float)):
+        return datetime.fromtimestamp(ts / 1000, timezone.utc).isoformat().replace('+00:00', 'Z')
+    return ts
+
+
+def _tool_call(call_id, name, arguments):
+    return {
+        'id': call_id,
+        'type': 'function',
+        'function': {
+            'name': name,
+            'arguments': arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False),
+        },
+    }
+
+
+def _tool_output(item):
+    """Return the printable output of a tool result payload."""
+    output = item.get('output')
+    if isinstance(output, list):
+        return _text(output)
+    if isinstance(output, str):
+        return output
+    if output is None:
+        return ''
+    return json.dumps(output, ensure_ascii=False)
+
+
+def open_session_text(session_file):
+    """Open a rollout file as text, transparently decompressing .zst archives."""
+    path = Path(session_file)
+    if path.name.endswith('.zst'):
+        try:
+            from compression import zstd as stdlib_zstd  # Python 3.14+
+            return io.StringIO(stdlib_zstd.decompress(path.read_bytes()).decode('utf-8', 'replace'))
+        except ImportError:
+            pass
+        try:
+            import zstandard
+            dctx = zstandard.ZstdDecompressor()
+            with path.open('rb') as handle:
+                return io.StringIO(dctx.stream_reader(handle).read().decode('utf-8', 'replace'))
+        except ImportError:
+            pass
+        zstd = shutil.which('zstd') or shutil.which('pzstd')
+        if not zstd:
+            raise RuntimeError('zstd support is unavailable: install zstd, or use Python 3.14+')
+        process = subprocess.Popen([zstd, '-dc', str(path)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        return io.TextIOWrapper(process.stdout, encoding='utf-8', errors='replace')
+    return path.open('r', encoding='utf-8', errors='replace')
+
+
+def _iter_events(session_file):
+    with open_session_text(session_file) as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
             try:
                 obj = json.loads(line)
-                event_type = obj.get('type')
-
-                if event_type == 'session_meta':
-                    session_meta = obj.get('payload', {})
-
-                elif event_type == 'event_msg':
-                    payload = obj.get('payload', {})
-                    payload_type = payload.get('type')
-
-                    if payload_type == 'user_message':
-                        message_text = payload.get('message', '').strip()
-                        if message_text:
-                            msg = {
-                                'role': 'user',
-                                'content': message_text,
-                                'timestamp': obj.get('timestamp')
-                            }
-
-                            # Add context if available
-                            if 'context' in payload:
-                                msg['context'] = payload['context']
-
-                            messages.append(msg)
-
-                    elif payload_type == 'agent_message':
-                        message_text = payload.get('message', '').strip()
-                        if message_text:
-                            msg = {
-                                'role': 'assistant',
-                                'content': message_text,
-                                'timestamp': obj.get('timestamp')
-                            }
-
-                            # Add model info if available
-                            if 'model' in payload:
-                                msg['model'] = payload['model']
-
-                            messages.append(msg)
-
-                    elif payload_type == 'tool_use':
-                        # Code execution, file edits, etc.
-                        tool_use = {
-                            'type': 'tool_use',
-                            'tool': payload.get('tool'),
-                            'input': payload.get('input'),
-                            'timestamp': obj.get('timestamp')
-                        }
-                        tool_results.append(tool_use)
-
-                    elif payload_type == 'tool_result':
-                        # Results from tool execution (diffs, outputs, etc.)
-                        tool_result = {
-                            'type': 'tool_result',
-                            'tool': payload.get('tool'),
-                            'output': payload.get('output'),
-                            'timestamp': obj.get('timestamp')
-                        }
-                        tool_results.append(tool_result)
-
-                    elif payload_type == 'diff':
-                        # Code diffs
-                        diff = {
-                            'type': 'diff',
-                            'file': payload.get('file'),
-                            'diff': payload.get('diff'),
-                            'timestamp': obj.get('timestamp')
-                        }
-                        tool_results.append(diff)
-
             except json.JSONDecodeError:
                 continue
+            if isinstance(obj, dict):
+                yield obj
 
-    if messages:
-        conv = {
-            'messages': messages,
-            'session_id': session_meta.get('id'),
-            'cwd': session_meta.get('cwd'),
-            'source': 'codex',
-            'session_file': str(session_file),
-            'timestamp': session_meta.get('timestamp')
-        }
 
-        if tool_results:
-            conv['tool_results'] = tool_results
+def _from_items(events):
+    """Parse the current `item_completed` shape into normalized messages."""
+    messages = []
+    pending_reasoning = []
+    saw_items = False
 
-        return conv
+    for obj in events:
+        event_type = obj.get('type')
+        payload = obj.get('payload') if isinstance(obj.get('payload'), dict) else {}
+        ts = _iso(obj.get('timestamp'))
 
-    return None
+        if event_type == 'event_msg' and payload.get('type') == 'item_completed':
+            saw_items = True
+            item = payload.get('item') if isinstance(payload.get('item'), dict) else {}
+            item_type = item.get('type')
+            item_ts = _iso(payload.get('completed_at_ms')) or ts
+
+            if item_type in TEXT_ITEMS:
+                content = _text(item.get('content'))
+                if not content:
+                    continue
+                message = {'role': TEXT_ITEMS[item_type], 'content': content, 'timestamp': item_ts}
+                if item_type == 'AgentMessage':
+                    if pending_reasoning:
+                        message['reasoning'] = '\n'.join(pending_reasoning)
+                        pending_reasoning = []
+                    if item.get('phase'):
+                        message['phase'] = item['phase']
+                messages.append(message)
+
+            elif item_type == 'Reasoning':
+                for text in item.get('summary_text') or []:
+                    if isinstance(text, str) and text:
+                        pending_reasoning.append(text)
+                for text in item.get('raw_content') or []:
+                    if isinstance(text, str) and text:
+                        pending_reasoning.append(text)
+
+            elif item_type in TOOL_ITEM_KEYS:
+                name, fields = TOOL_ITEM_KEYS[item_type]
+                arguments = {field: item[field] for field in fields if field in item}
+                call_id = item.get('id')
+                messages.append({
+                    'role': 'assistant', 'content': '', 'timestamp': item_ts,
+                    'tool_calls': [_tool_call(call_id, name, arguments)],
+                })
+                output = item.get('stdout')
+                if output is None:
+                    output = item.get('result')
+                if output is not None:
+                    tool_message = {
+                        'role': 'tool', 'tool_call_id': call_id, 'name': name,
+                        'content': output if isinstance(output, str) else json.dumps(output, ensure_ascii=False),
+                        'timestamp': item_ts,
+                    }
+                    if item.get('exit_code') is not None:
+                        tool_message['exit_code'] = item['exit_code']
+                    if item.get('stderr'):
+                        tool_message['stderr'] = item['stderr']
+                    if item.get('status'):
+                        tool_message['status'] = item['status']
+                    messages.append(tool_message)
+
+            else:
+                # Unknown item: keep it as a tool call so nothing is silently dropped.
+                call_id = item.get('id')
+                arguments = {k: v for k, v in item.items() if k not in ('type', 'id')}
+                if arguments:
+                    messages.append({
+                        'role': 'assistant', 'content': '', 'timestamp': item_ts,
+                        'tool_calls': [_tool_call(call_id, (item_type or 'unknown').lower(), arguments)],
+                    })
+
+        elif event_type == 'event_msg' and payload.get('type') == 'task_complete':
+            if pending_reasoning:
+                messages.append({'role': 'assistant', 'content': '', 'reasoning': '\n'.join(pending_reasoning),
+                                 'timestamp': ts})
+                pending_reasoning = []
+
+    if pending_reasoning:
+        messages.append({'role': 'assistant', 'content': '', 'reasoning': '\n'.join(pending_reasoning)})
+
+    return messages, saw_items
+
+
+def _from_legacy_events(events):
+    """Parse older rollouts: `user_message`, `agent_message`, and response_item messages."""
+    messages = []
+    tool_results = []
+
+    for obj in events:
+        event_type = obj.get('type')
+        payload = obj.get('payload') if isinstance(obj.get('payload'), dict) else {}
+        ts = _iso(obj.get('timestamp'))
+        payload_type = payload.get('type')
+
+        if event_type == 'event_msg':
+            if payload_type == 'user_message':
+                content = _text(payload.get('message')) or (payload.get('message') or '')
+                if str(content).strip():
+                    messages.append({'role': 'user', 'content': str(content).strip(), 'timestamp': ts})
+            elif payload_type == 'agent_message':
+                content = _text(payload.get('message')) or (payload.get('message') or '')
+                if str(content).strip():
+                    message = {'role': 'assistant', 'content': str(content).strip(), 'timestamp': ts}
+                    if payload.get('model'):
+                        message['model'] = payload['model']
+                    messages.append(message)
+            elif payload_type in ('tool_use', 'tool_result', 'diff'):
+                tool_results.append({'type': payload_type, 'tool': payload.get('tool'),
+                                     'input': payload.get('input'), 'output': payload.get('output'),
+                                     'file': payload.get('file'), 'diff': payload.get('diff'),
+                                     'timestamp': ts})
+
+        elif event_type == 'response_item':
+            if payload_type == 'message':
+                role = payload.get('role')
+                content = _text(payload.get('content'))
+                if role in ('user', 'assistant') and content.strip():
+                    messages.append({'role': role, 'content': content, 'timestamp': ts})
+            elif payload_type == 'custom_tool_call':
+                messages.append({
+                    'role': 'assistant', 'content': '', 'timestamp': ts,
+                    'tool_calls': [_tool_call(payload.get('call_id'), payload.get('name'), payload.get('input'))],
+                })
+            elif payload_type == 'custom_tool_call_output':
+                messages.append({'role': 'tool', 'tool_call_id': payload.get('call_id'),
+                                 'content': _tool_output(payload), 'timestamp': ts})
+            elif payload_type == 'reasoning':
+                summary = payload.get('summary')
+                if isinstance(summary, list) and summary:
+                    messages.append({'role': 'assistant', 'content': '', 'reasoning': _text(summary),
+                                     'timestamp': ts})
+
+    return messages, tool_results
+
+
+def extract_codex_session(session_file):
+    """Extract one Codex rollout with full context."""
+    events = list(_iter_events(session_file))
+
+    session_meta = {}
+    usage = {}
+    for obj in events:
+        event_type = obj.get('type')
+        payload = obj.get('payload') if isinstance(obj.get('payload'), dict) else {}
+        if event_type == 'session_meta' and payload:
+            session_meta = payload
+        elif event_type == 'event_msg' and payload.get('type') == 'token_count':
+            info = payload.get('info') if isinstance(payload.get('info'), dict) else {}
+            if info.get('total_token_usage'):
+                usage = info['total_token_usage']
+
+    messages, saw_items = _from_items(events)
+    tool_results = []
+    if not saw_items:
+        messages, tool_results = _from_legacy_events(events)
+
+    if not messages:
+        return None
+
+    conv = {
+        'messages': messages,
+        'session_id': session_meta.get('id') or session_meta.get('session_id') or Path(session_file).stem,
+        'cwd': session_meta.get('cwd'),
+        'source': 'codex',
+        'session_file': str(session_file),
+        'timestamp': _iso(session_meta.get('timestamp')),
+    }
+    for key, value in (
+        ('cli_version', session_meta.get('cli_version')),
+        ('originator', session_meta.get('originator')),
+        ('model_provider', session_meta.get('model_provider')),
+        ('git_branch', (session_meta.get('git') or {}).get('branch') if isinstance(session_meta.get('git'), dict) else None),
+        ('token_usage', usage or None),
+    ):
+        if value:
+            conv[key] = value
+
+    if tool_results:
+        conv['tool_results'] = tool_results
+
+    return conv
+
 
 def find_all_codex_sessions(installation):
-    """Find all Codex session files in an installation"""
+    """Find all Codex rollout files in an installation, live and archived."""
     session_files = []
 
-    # Check for sessions directory
-    sessions_dir = installation / 'sessions'
-    if sessions_dir.exists():
-        # Sessions are organized by date: YYYY/MM/DD/rollout-*.jsonl
-        session_files.extend(list(sessions_dir.rglob('rollout-*.jsonl')))
+    for subdirectory in ('sessions', 'archived_sessions'):
+        candidate = installation / subdirectory
+        if candidate.exists():
+            session_files.extend(sorted(candidate.rglob('rollout-*.jsonl')))
+            session_files.extend(sorted(candidate.rglob('rollout-*.jsonl.zst')))
 
     # Also check for project-based structure
     projects_dir = installation / 'projects'
@@ -171,13 +363,31 @@ def find_all_codex_sessions(installation):
 
     return session_files
 
+
+def dedupe_sessions(session_files):
+    """Keep one rollout per session id, preferring the larger file."""
+    by_id = {}
+    for path in session_files:
+        key = Path(path).name.replace('.zst', '')
+        for prefix in ('rollout-',):
+            if key.startswith(prefix):
+                key = key[len(prefix):]
+        try:
+            size = Path(path).stat().st_size
+        except OSError:
+            size = 0
+        existing = by_id.get(key)
+        if existing is None or size > existing[0]:
+            by_id[key] = (size, Path(path))
+    return [path for _, path in sorted(by_id.values(), key=lambda entry: str(entry[1]))]
+
+
 def main():
-    print("="*80)
+    print("=" * 80)
     print("CODEX COMPLETE DATA EXTRACTION")
-    print("="*80)
+    print("=" * 80)
     print()
 
-    # Find all Codex installations
     print("🔍 Searching for Codex installations...")
     installations = find_codex_installations()
 
@@ -190,19 +400,22 @@ def main():
         print(f"   - {inst}")
     print()
 
-    # Extract from all installations
     all_conversations = []
     installation_stats = {}
 
     for installation in installations:
         print(f"📂 Processing: {installation}")
 
-        session_files = find_all_codex_sessions(installation)
+        session_files = dedupe_sessions(find_all_codex_sessions(installation))
         print(f"   Found {len(session_files)} session files")
 
         conversations = []
         for session_file in session_files:
-            conv = extract_codex_session(session_file)
+            try:
+                conv = extract_codex_session(session_file)
+            except RuntimeError as error:
+                print(f"   ⚠️  Skipping {Path(session_file).name}: {error}")
+                continue
             if conv:
                 conv['installation'] = str(installation)
                 conversations.append(conv)
@@ -212,12 +425,12 @@ def main():
             installation_stats[str(installation)] = len(conversations)
             print(f"   ✅ {len(conversations)} conversations")
         else:
-            print(f"   ⚠️  No conversations found")
+            print("   ⚠️  No conversations found")
 
     print()
-    print("="*80)
+    print("=" * 80)
     print("EXTRACTION COMPLETE")
-    print("="*80)
+    print("=" * 80)
     print(f"Total conversations: {len(all_conversations):,}")
 
     if not all_conversations:
@@ -226,7 +439,9 @@ def main():
 
     # Statistics
     total_messages = sum(len(c['messages']) for c in all_conversations)
-    with_tools = sum(1 for c in all_conversations if 'tool_results' in c)
+    with_tools = sum(1 for c in all_conversations
+                     if 'tool_results' in c
+                     or any(m.get('tool_calls') or m.get('role') == 'tool' for m in c['messages']))
     complete = sum(1 for c in all_conversations
                    if any(m['role'] == 'assistant' for m in c['messages']))
 
@@ -247,7 +462,7 @@ def main():
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     output_file = output_dir / f'codex_conversations_{timestamp}.jsonl'
 
-    with open(output_file, 'w') as f:
+    with open(output_file, 'w', encoding='utf-8') as f:
         for conv in all_conversations:
             f.write(json.dumps(conv, ensure_ascii=False) + '\n')
 
@@ -255,6 +470,7 @@ def main():
     print(f"✅ Saved to: {output_file}")
     print(f"   Size: {file_size:.2f} MB")
     print(f"   Format: JSONL (one conversation per line)")
+
 
 if __name__ == '__main__':
     main()

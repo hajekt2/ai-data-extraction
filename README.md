@@ -35,8 +35,12 @@ Extracts from Claude Code / Claude Desktop
 ### 2. `extract_codex.py`
 Extracts from Codex (if installed)
 - **Searches**: `~/.codex`, `~/.codex-local`
-- **Formats**: Rollout JSONL files
-- **Includes**: User/agent messages, tool results, diffs
+- **Formats**: Rollout JSONL files under `sessions/YYYY/MM/DD/` and `archived_sessions/`,
+  including zstd archives (`rollout-*.jsonl.zst`) that recent builds produce
+- **Includes**: User/agent messages, reasoning summaries, commands with output, file edits,
+  tool calls/results, token usage, CLI version and working directory
+- **Handles both rollout shapes**: current `event_msg`/`item_completed` items and the older
+  `user_message`/`agent_message` payloads; a session stored twice (live plus archived) is emitted once
 
 ### 3. `extract_cursor.py`
 Extracts from Cursor (Chat + Composer + Agent) - ALL VERSIONS
@@ -141,6 +145,10 @@ Extracts from Hermes Agent
 # No dependencies required - uses Python 3 standard library
 python3 --version  # Ensure Python 3.6+ is installed
 ```
+
+Compressed Codex archives (`rollout-*.jsonl.zst`) need one of: Python 3.14+ (built-in
+`compression.zstd`), the `zstandard` package, or the `zstd` command-line tool. Everything
+else runs on the standard library alone.
 
 ### Basic Usage
 
@@ -262,7 +270,9 @@ Each script follows this pattern:
 
 #### Claude Code / Codex
 - **Format**: JSONL files (one event per line)
-- **Location**: `~/.claude/projects/[project]/[session].jsonl`
+- **Location**: `~/.claude/projects/[project]/[session].jsonl`, and for Codex
+  `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` plus `~/.codex/archived_sessions/`
+  (recent archives are zstd-compressed)
 - **Structure**: Event-based with type markers
 
 #### Cursor (v0.43 - v2.0+)
@@ -330,6 +340,17 @@ wc -l all_conversations.jsonl
 
 # Count by source
 grep -o '"source":"[^"]*"' all_conversations.jsonl | sort | uniq -c
+```
+
+### Build one cumulative corpus
+
+Each run writes its own timestamped files, so a session that was extracted twice appears
+twice. `corpus_dedupe.py` merges runs and keeps one record per `(source, session_id)`,
+preferring the largest record because a later run of the same session usually holds more
+messages:
+
+```bash
+python3 corpus_dedupe.py extracted_data older_run_directory -o ALL_CONVERSATIONS_DEDUPED.jsonl
 ```
 
 ### Create Agent Skills from a corpus
