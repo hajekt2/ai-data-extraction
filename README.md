@@ -178,8 +178,11 @@ python3 extract_openclaw.py
 # Extract from Hermes
 python3 extract_hermes.py
 
-# Extract from ALL tools at once
+# Extract from ALL tools at once on macOS/Linux
 ./extract_all.sh
+
+# Extract from ALL tools at once on Windows PowerShell
+.\extract_all.ps1
 ```
 
 ### Output
