@@ -74,19 +74,27 @@ def extract_claude_project_conversations(project_dir):
         for proj in (project_dir / 'projects').iterdir():
             if proj.is_dir():
                 jsonl_files.extend(list(proj.glob('*.jsonl')))
+                # Subagent transcripts: projects/<project>/<session>/subagents/agent-*.jsonl
+                jsonl_files.extend(list(proj.glob('*/subagents/agent-*.jsonl')))
     else:
         # Old structure: direct JSONL files
         jsonl_files = list(project_dir.glob('*.jsonl'))
 
-    # Filter out agent files
-    jsonl_files = [f for f in jsonl_files if not f.name.startswith('agent-')]
+    # Filter out agent files that are not session subagent transcripts
+    jsonl_files = [f for f in jsonl_files
+                   if not f.name.startswith('agent-') or f.parent.name == 'subagents']
 
     for jsonl_file in jsonl_files:
         try:
             messages = []
             session_id = jsonl_file.stem
             project_path = None
-            project_name = jsonl_file.parent.name if jsonl_file.parent.name != 'projects' else None
+            is_subagent = jsonl_file.parent.name == 'subagents'
+            if is_subagent:
+                # <project>/<session>/subagents/agent-<id>.jsonl
+                project_name = jsonl_file.parent.parent.parent.name
+            else:
+                project_name = jsonl_file.parent.name if jsonl_file.parent.name != 'projects' else None
 
             with open(jsonl_file, 'r') as f:
                 for line in f:
@@ -165,7 +173,7 @@ def extract_claude_project_conversations(project_dir):
                         continue
 
             if messages:
-                conversations.append({
+                conversation = {
                     'messages': messages,
                     'source': 'claude-code',
                     'session_id': session_id,
@@ -173,7 +181,12 @@ def extract_claude_project_conversations(project_dir):
                     'project_name': project_name,
                     'source_file': str(jsonl_file),
                     'installation': str(project_dir)
-                })
+                }
+                if is_subagent:
+                    conversation['subagent'] = True
+                    conversation['agent_id'] = session_id[len('agent-'):]
+                    conversation['parent_session_id'] = jsonl_file.parent.parent.name
+                conversations.append(conversation)
 
         except Exception as e:
             print(f"Error processing {jsonl_file}: {e}")
