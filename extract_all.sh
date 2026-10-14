@@ -9,6 +9,11 @@ echo ""
 # Create output directory
 mkdir -p extracted_data
 
+# Keep any historical corpus intact and combine only files produced by this run.
+run_marker=$(mktemp)
+trap 'rm -f "$run_marker"' EXIT
+touch "$run_marker"
+
 # Track what we found
 declare -a found_tools=()
 declare -a not_found=()
@@ -97,6 +102,22 @@ for tool in pi omp droid; do
     echo ""
 done
 
+echo "🔍 Extracting from OpenClaw..."
+if python3 extract_openclaw.py 2>&1 | tee extracted_data/openclaw_extraction.log | grep -q "Total conversations: [1-9]"; then
+    found_tools+=("OpenClaw")
+else
+    not_found+=("OpenClaw")
+fi
+echo ""
+
+echo "🔍 Extracting from Hermes..."
+if python3 extract_hermes.py 2>&1 | tee extracted_data/hermes_extraction.log | grep -q "Total conversations: [1-9]"; then
+    found_tools+=("Hermes")
+else
+    not_found+=("Hermes")
+fi
+echo ""
+
 echo "================================================================================"
 echo "EXTRACTION SUMMARY"
 echo "================================================================================"
@@ -118,8 +139,13 @@ if [ ${#not_found[@]} -gt 0 ]; then
     echo ""
 fi
 
-# Count total conversations
-total_lines=$(cat extracted_data/*.jsonl 2>/dev/null | wc -l | tr -d ' ')
+# Count only the conversations extracted during this run. Existing corpora stay untouched.
+mapfile -d '' new_jsonl_files < <(find extracted_data -maxdepth 1 -type f -name '*.jsonl' ! -name 'ALL_CONVERSATIONS_*' -newer "$run_marker" -print0 | sort -z)
+total_lines=0
+for file in "${new_jsonl_files[@]}"; do
+    file_lines=$(wc -l < "$file")
+    total_lines=$((total_lines + file_lines))
+done
 
 echo "📊 Total conversations extracted: $total_lines"
 echo ""
@@ -129,9 +155,13 @@ echo "📁 Output files:"
 ls -lh extracted_data/*.jsonl 2>/dev/null | awk '{print "   " $9 " (" $5 ")"}'
 echo ""
 
-# Create combined file
+# Create combined file from this run only
 combined_file="extracted_data/ALL_CONVERSATIONS_$(date +%Y%m%d_%H%M%S).jsonl"
-cat extracted_data/*.jsonl 2>/dev/null | grep -v "extraction.log" > "$combined_file"
+if [ ${#new_jsonl_files[@]} -gt 0 ]; then
+    cat "${new_jsonl_files[@]}" > "$combined_file"
+else
+    : > "$combined_file"
+fi
 
 if [ -f "$combined_file" ]; then
     combined_size=$(ls -lh "$combined_file" | awk '{print $5}')

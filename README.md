@@ -119,6 +119,20 @@ extractor in `extract_cursor.py` does not cover)
   - System/user/assistant/tool turns with full content
   - Chat/agent ids, title, mode, created-at, code-context and diff flags
 
+### 10. `extract_openclaw.py`
+Extracts from OpenClaw agent sessions
+- **Searches**: `~/.openclaw/agents/*/sessions/` or `OPENCLAW_HOME`
+- **Formats**: JSONL session event files
+- **Includes**: Per-agent conversations, thinking blocks, tool calls/results, lifecycle metadata, and workspace paths
+- **Excludes**: Derived `.trajectory.jsonl` files, memory indexes, caches, credentials, and internal databases
+
+### 11. `extract_hermes.py`
+Extracts from Hermes Agent
+- **Searches**: `~/.hermes/state.db` or `HERMES_HOME`, with legacy session-file fallback
+- **Formats**: SQLite state database, JSON, and JSONL session files
+- **Includes**: User/assistant messages, tool calls/results, reasoning metadata, model/session metadata, and project paths
+- **Excludes**: Authentication, the system-prompt registry, caches, and model indexes
+
 ## 🚀 Quick Start
 
 ### Installation
@@ -158,6 +172,12 @@ python3 extract_opencode.py
 # Extract from Cursor CLI (cursor-agent)
 python3 extract_cursor_cli.py
 
+# Extract from OpenClaw
+python3 extract_openclaw.py
+
+# Extract from Hermes
+python3 extract_hermes.py
+
 # Extract from ALL tools at once
 ./extract_all.sh
 ```
@@ -175,7 +195,9 @@ extracted_data/
 ├── trae_conversations_20250116_143115.jsonl
 ├── windsurf_conversations_20250116_143130.jsonl
 ├── continue_conversations_20250116_143145.jsonl
-└── opencode_conversations_20250116_143200.jsonl
+├── opencode_conversations_20250116_143200.jsonl
+├── openclaw_conversations_20250116_143230.jsonl
+└── hermes_conversations_20250116_143245.jsonl
 ```
 
 ## 📊 Output Format
@@ -261,6 +283,16 @@ Each script follows this pattern:
 - **Format**: Hybrid (JSONL + SQLite)
 - **Location**: Similar to VSCode/Cursor structure
 - **Structure**: VSCode extension data format
+
+#### OpenClaw
+- **Format**: JSONL event stream, one event per line
+- **Location**: `~/.openclaw/agents/<agentId>/sessions/<sessionId>.jsonl`
+- **Structure**: `session.started` / `session.ended` lifecycle events plus message events carrying text, thinking, `toolCall` and `toolResult` payloads
+
+#### Hermes
+- **Format**: SQLite `state.db` (`sessions`, `messages`), with legacy JSON/JSONL session files
+- **Location**: `~/.hermes/state.db`
+- **Structure**: Per-session rows with role, content, tool calls, tool results, and reasoning columns
 
 ## 🎓 Understanding the Data
 
