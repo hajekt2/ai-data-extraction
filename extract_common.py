@@ -180,6 +180,12 @@ def parse_pi_style_session(session_file, source, metadata=None):
     for key, value in metadata.items():
         if value is not None and value != "":
             conversation[key] = value
+    # Session-level time lets a corpus answer "what period does this source cover?"
+    # without re-reading every message.
+    stamps = [m["timestamp"] for m in messages if m.get("timestamp")]
+    if stamps:
+        conversation.setdefault("created_at", stamps[0])
+        conversation.setdefault("updated_at", stamps[-1])
     if unclaimed_tool_results:
         conversation["tool_results"] = unclaimed_tool_results
     return conversation

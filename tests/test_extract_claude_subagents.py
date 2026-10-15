@@ -62,6 +62,26 @@ class ClaudeSubagentTests(unittest.TestCase):
             self.assertEqual([m["content"] for m in subagent["messages"]],
                              ["explore the repo", "here is what I found"])
 
+    def test_records_first_and_last_entry_timestamps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.build_installation(root)
+            session = root / "projects" / "-home-haja-work-demo" / "sess-1.jsonl"
+            lines = session.read_text(encoding="utf-8").splitlines()
+            first = json.loads(lines[0])
+            last = json.loads(lines[-1])
+            first["timestamp"] = "2026-10-14T08:00:00.000Z"
+            last["timestamp"] = "2026-10-14T09:30:00.000Z"
+            session.write_text(
+                "".join(json.dumps(o) + "\n" for o in (first, last)),
+                encoding="utf-8",
+            )
+
+            by_id = {c["session_id"]: c for c in extract_claude_project_conversations(root)}
+
+            self.assertEqual(by_id["sess-1"]["created_at"], "2026-10-14T08:00:00.000Z")
+            self.assertEqual(by_id["sess-1"]["updated_at"], "2026-10-14T09:30:00.000Z")
+
 
 if __name__ == "__main__":
     unittest.main()

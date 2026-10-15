@@ -87,6 +87,8 @@ def extract_claude_project_conversations(project_dir):
     for jsonl_file in jsonl_files:
         try:
             messages = []
+            first_ts = None
+            last_ts = None
             session_id = jsonl_file.stem
             project_path = None
             is_subagent = jsonl_file.parent.name == 'subagents'
@@ -104,6 +106,12 @@ def extract_claude_project_conversations(project_dir):
                     try:
                         obj = json.loads(line)
                         msg_type = obj.get('type')
+
+                        obj_ts = obj.get('timestamp')
+                        if obj_ts:
+                            if first_ts is None:
+                                first_ts = obj_ts
+                            last_ts = obj_ts
 
                         if msg_type == 'user':
                             message = obj.get('message', {})
@@ -180,7 +188,9 @@ def extract_claude_project_conversations(project_dir):
                     'project_path': project_path,
                     'project_name': project_name,
                     'source_file': str(jsonl_file),
-                    'installation': str(project_dir)
+                    'installation': str(project_dir),
+                    'created_at': first_ts,
+                    'updated_at': last_ts or first_ts,
                 }
                 if is_subagent:
                     conversation['subagent'] = True

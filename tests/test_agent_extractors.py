@@ -59,6 +59,8 @@ class PiStyleExtractorTests(unittest.TestCase):
 
             self.assertEqual(conversation["project_path"], "/workspace")
             self.assertEqual(len(conversation["messages"]), 2)
+            self.assertEqual(conversation["created_at"], "2026-08-21T10:00:00Z")
+            self.assertEqual(conversation["updated_at"], "2026-08-21T10:00:01Z")
             assistant = conversation["messages"][1]
             self.assertEqual(assistant["tool_uses"][0]["name"], "read")
             self.assertEqual(assistant["tool_results"][0]["content"], "contents")

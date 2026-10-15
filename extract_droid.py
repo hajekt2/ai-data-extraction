@@ -152,6 +152,8 @@ def extract_droid_sessions():
             calling_session_id = None
             calling_tool_use_id = None
             is_manual_title = None
+            first_ts = None
+            last_ts = None
 
             with open(jsonl_file, "r", encoding="utf-8") as f:
                 for line in f:
@@ -166,6 +168,12 @@ def extract_droid_sessions():
                     if not isinstance(obj, dict):
                         continue
                     entry_type = obj.get("type")
+
+                    obj_ts = obj.get("timestamp")
+                    if obj_ts:
+                        if first_ts is None:
+                            first_ts = obj_ts
+                        last_ts = obj_ts
 
                     if entry_type == "session_start":
                         session_id = obj.get("id", session_id)
@@ -207,6 +215,8 @@ def extract_droid_sessions():
                 "session_id": session_id,
                 "project_path": session_cwd,
                 "source_file": str(jsonl_file),
+                "created_at": first_ts,
+                "updated_at": last_ts or first_ts,
             }
 
             if session_title:
