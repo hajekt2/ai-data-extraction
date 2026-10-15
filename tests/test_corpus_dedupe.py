@@ -53,6 +53,33 @@ class CorpusDedupeTests(unittest.TestCase):
             self.assertEqual(total, 2)
             self.assertEqual(len(best), 2)
 
+    def test_codex_subagent_rollouts_share_a_session_id_but_stay_separate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run1 = write_jsonl(root / "run1.jsonl", [
+                {"source": "codex", "session_id": "parent-1", "session_file": "/x/rollout-a.jsonl",
+                 "messages": ["parent thread"]},
+                {"source": "codex", "session_id": "parent-1", "session_file": "/x/rollout-b.jsonl",
+                 "messages": ["subagent one"]},
+            ])
+            run2 = write_jsonl(root / "run2.jsonl", [
+                {"source": "codex", "session_id": "parent-1", "session_file": "/x/rollout-a.jsonl.zst",
+                 "messages": ["parent thread", "with more messages"]},
+            ])
+
+            files = collect_inputs([run1, run2])
+            best, total = index_records(files)
+
+            self.assertEqual(total, 3)
+            self.assertEqual(len(best), 2)
+
+            output = root / "merged.jsonl"
+            written = write_corpus(files, best, output)
+            self.assertEqual(sum(written.values()), 2)
+            records = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+            parent = [r for r in records if r["session_file"].endswith("rollout-a.jsonl.zst")][0]
+            self.assertEqual(len(parent["messages"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

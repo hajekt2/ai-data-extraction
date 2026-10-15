@@ -33,8 +33,21 @@ def collect_inputs(paths):
 
 
 def _record_key(record, line):
+    """Key a record by source plus the session it came from.
+
+    Codex writes one rollout per agent thread and every subagent rollout inherits the
+    parent's `session_id`, so the session id alone would collapse distinct subagent
+    transcripts into one record. The rollout file name separates them, and it is stable
+    across extraction runs, so it is part of the key whenever the extractor recorded it.
+    """
     source = record.get('source') or 'unknown'
     session_id = record.get('session_id')
+    session_file = record.get('session_file') or record.get('source_file')
+    if session_file:
+        name = str(session_file).rsplit('/', 1)[-1]
+        if name.endswith('.zst'):
+            name = name[:-len('.zst')]
+        return (source, str(session_id), name)
     if session_id is None:
         session_id = 'sha256:' + hashlib.sha256(line.encode('utf-8')).hexdigest()
     return (source, str(session_id))
